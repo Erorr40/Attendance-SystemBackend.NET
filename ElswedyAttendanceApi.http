@@ -1,0 +1,6 @@
+@ElswedyAttendanceApi_HostAddress = http://localhost:5007
+
+GET {{ElswedyAttendanceApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
