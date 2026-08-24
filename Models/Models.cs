@@ -73,7 +73,8 @@ public class Schedule
     public int GracePeriodMinutes { get; set; } = 15;
     public int LateThresholdMinutes { get; set; } = 45;
     public int HalfDayThresholdMinutes { get; set; } = 120;
-    public List<string> WorkDays { get; set; } = new() { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday" };
+    public List<string> WorkingDays { get; set; } = new() { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday" };
+    public List<string> WorkDays { get => WorkingDays; set => WorkingDays = value; }
     public bool IsDefault { get; set; } = true;
     public int AssignedTeachersCount { get; set; }
 }
