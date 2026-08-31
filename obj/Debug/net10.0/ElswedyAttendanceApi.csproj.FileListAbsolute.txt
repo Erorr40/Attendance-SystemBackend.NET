@@ -44,3 +44,9 @@ D:\School\Senior\CapMain\backend-aspnet\obj\Debug\net10.0\refint\ElswedyAttendan
 D:\School\Senior\CapMain\backend-aspnet\obj\Debug\net10.0\ElswedyAttendanceApi.pdb
 D:\School\Senior\CapMain\backend-aspnet\obj\Debug\net10.0\ElswedyAttendanceApi.genruntimeconfig.cache
 D:\School\Senior\CapMain\backend-aspnet\obj\Debug\net10.0\ref\ElswedyAttendanceApi.dll
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\web.config
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\appsettings.Development.json
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\appsettings.json
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\ElswedyAttendanceApi.deps.json
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\ElswedyAttendanceApi.runtimeconfig.json
+D:\School\Senior\CapMain\backend-aspnet\bin\Debug\net10.0\publish\ElswedyAttendanceApi.staticwebassets.endpoints.json

@@ -241,3 +241,19 @@ public class CorrectionRequest
     public string? AdminName { get; set; }
     public string? AdminRole { get; set; }
 }
+
+public class RevealPasswordRequest
+{
+    public string TeacherId { get; set; } = string.Empty;
+    public string? RequesterRole { get; set; }
+    public string? RequesterName { get; set; }
+}
+
+public class ResetPasswordRequest
+{
+    public string TeacherId { get; set; } = string.Empty;
+    public string? NewPassword { get; set; }
+    public string? RequesterRole { get; set; }
+    public string? RequesterName { get; set; }
+}
+

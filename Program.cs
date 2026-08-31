@@ -75,8 +75,26 @@ builder.Services.AddAuthorization();
 var app = builder.Build();
 
 app.UseCors("StrictEnterpriseCors");
+
+// Enterprise Security Headers Middleware
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Append("X-Frame-Options", "DENY");
+    context.Response.Headers.Append("X-XSS-Protection", "1; mode=block");
+    context.Response.Headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
+    context.Response.Headers.Append("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    context.Response.Headers.Append("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;");
+    context.Response.Headers.Remove("Server");
+    context.Response.Headers.Remove("X-Powered-By");
+    await next();
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Rate Limiting & Brute-Force Defense Storage
+var loginAttempts = new System.Collections.Concurrent.ConcurrentDictionary<string, (int Attempts, DateTime LockoutUntil)>();
 
 // -------------------------------------------------------------
 // Security: Strict JWT Validation & Role Enforcement Helper
@@ -191,12 +209,28 @@ app.MapGet("/api", healthResponse);
 app.MapGet("/health", healthResponse);
 app.MapGet("/api/health", healthResponse);
 
-// 2. Authentication: POST /api/auth/login (Public)
-app.MapPost("/api/auth/login", (LoginRequest req, DataStore store) =>
+// 2. Authentication: POST /api/auth/login (Public with Rate Limiting & Brute-Force Shield)
+app.MapPost("/api/auth/login", (LoginRequest req, HttpContext context, DataStore store) =>
 {
     if (string.IsNullOrWhiteSpace(req.UsernameOrEmail) || string.IsNullOrWhiteSpace(req.Password))
     {
         return Results.BadRequest(new { error = "Username/Email and Password are required." });
+    }
+
+    var ip = context.Connection.RemoteIpAddress?.ToString() ?? "remote-client";
+    var clientKey = $"{ip}:{req.UsernameOrEmail.Trim().ToLower()}";
+
+    // Check Lockout
+    if (loginAttempts.TryGetValue(clientKey, out var attemptInfo))
+    {
+        if (DateTime.UtcNow < attemptInfo.LockoutUntil)
+        {
+            var remainingSec = (int)(attemptInfo.LockoutUntil - DateTime.UtcNow).TotalSeconds;
+            return Results.Json(new
+            {
+                error = $"Account temporarily locked due to multiple failed login attempts. Please retry in {remainingSec} seconds."
+            }, statusCode: 429);
+        }
     }
 
     var q = req.UsernameOrEmail.Trim().ToLower();
@@ -210,7 +244,22 @@ app.MapPost("/api/auth/login", (LoginRequest req, DataStore store) =>
         bool valid = BCrypt.Net.BCrypt.Verify(req.Password, user.PasswordHash) || req.Password == "elswedy@2026" || req.Password == "board@2026" || req.Password == "emp@2026";
         if (valid)
         {
+            loginAttempts.TryRemove(clientKey, out _);
             var token = GenerateJwt(user, keyBytes);
+
+            // Audit Success
+            store.AuditLogs.Insert(0, new AuditLog
+            {
+                Id = $"audit-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+                Timestamp = DateTime.UtcNow.ToString("o"),
+                Action = "AUTH_LOGIN_SUCCESS",
+                Entity = "Session",
+                EntityId = user.Id,
+                ActorName = user.Name,
+                ActorRole = user.Role,
+                Details = $"User {user.Name} ({user.Username}) logged in successfully from {ip}."
+            });
+
             return Results.Ok(new
             {
                 success = true,
@@ -238,6 +287,7 @@ app.MapPost("/api/auth/login", (LoginRequest req, DataStore store) =>
         bool valid = BCrypt.Net.BCrypt.Verify(req.Password, teacher.PasswordHash) || req.Password == "elswedy@2026";
         if (valid)
         {
+            loginAttempts.TryRemove(clientKey, out _);
             var teacherUser = new User
             {
                 Id = teacher.Id,
@@ -249,6 +299,20 @@ app.MapPost("/api/auth/login", (LoginRequest req, DataStore store) =>
                 Avatar = teacher.Avatar
             };
             var token = GenerateJwt(teacherUser, keyBytes);
+
+            // Audit Success
+            store.AuditLogs.Insert(0, new AuditLog
+            {
+                Id = $"audit-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+                Timestamp = DateTime.UtcNow.ToString("o"),
+                Action = "AUTH_LOGIN_SUCCESS",
+                Entity = "Session",
+                EntityId = teacher.Id,
+                ActorName = teacher.FullName,
+                ActorRole = "Faculty Member",
+                Details = $"Faculty {teacher.FullName} ({teacher.EmployeeId}) logged into portal from {ip}."
+            });
+
             return Results.Ok(new
             {
                 success = true,
@@ -267,7 +331,41 @@ app.MapPost("/api/auth/login", (LoginRequest req, DataStore store) =>
         }
     }
 
-    return Results.Json(new { error = "Invalid credentials. Please verify your institutional username and password." }, statusCode: 401);
+    // Failed Attempt: Record and Lockout if threshold reached
+    var currentAttempts = 1;
+    if (loginAttempts.TryGetValue(clientKey, out var existing))
+    {
+        currentAttempts = existing.Attempts + 1;
+    }
+
+    var lockout = currentAttempts >= 5 ? DateTime.UtcNow.AddMinutes(15) : DateTime.MinValue;
+    loginAttempts[clientKey] = (currentAttempts, lockout);
+
+    // Audit Failure
+    store.AuditLogs.Insert(0, new AuditLog
+    {
+        Id = $"audit-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+        Timestamp = DateTime.UtcNow.ToString("o"),
+        Action = "AUTH_LOGIN_FAILED",
+        Entity = "Authentication",
+        EntityId = req.UsernameOrEmail,
+        ActorName = "Anonymous",
+        ActorRole = "Unauthenticated",
+        Details = $"Failed login attempt #{currentAttempts} for identifier '{req.UsernameOrEmail}' from {ip}."
+    });
+
+    if (currentAttempts >= 5)
+    {
+        return Results.Json(new
+        {
+            error = "Security Lockout: Too many failed login attempts. IP temporarily banned for 15 minutes."
+        }, statusCode: 429);
+    }
+
+    return Results.Json(new
+    {
+        error = $"Invalid credentials. Please verify your institutional username and password. ({5 - currentAttempts} attempts remaining)"
+    }, statusCode: 401);
 });
 
 // 3. Authentication: GET /api/auth/me (Protected)
@@ -292,6 +390,78 @@ app.MapGet("/api/auth/me", (HttpContext context, DataStore store) =>
 });
 
 app.MapPost("/api/auth/logout", () => Results.Ok(new { success = true, message = "Logged out successfully." }));
+
+// POST /api/auth/reveal-teacher-password (HR Admin Only)
+app.MapPost("/api/auth/reveal-teacher-password", (RevealPasswordRequest req, HttpContext context, DataStore store) =>
+{
+    var authCheck = ValidateRole(context, store, "hr_admin");
+    if (authCheck != null) return authCheck;
+
+    var teacher = store.Teachers.FirstOrDefault(t => t.Id == req.TeacherId);
+    if (teacher == null) return Results.NotFound(new { error = "Teacher record not found." });
+
+    var currentUser = GetAuthenticatedUser(context, store)!;
+    var plain = teacher.PlainPassword ?? "elswedy@2026";
+
+    // Add Audit Log
+    store.AuditLogs.Insert(0, new AuditLog
+    {
+        Id = $"audit-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+        Timestamp = DateTime.UtcNow.ToString("o"),
+        Action = "TEACHER_CREDENTIALS_VIEWED",
+        Entity = "TeacherCredential",
+        EntityId = teacher.Id,
+        ActorName = currentUser.Name,
+        ActorRole = "HR Admin",
+        Details = $"HR Admin {currentUser.Name} viewed institutional credentials for {teacher.FullName} ({teacher.EmployeeId})."
+    });
+
+    return Results.Ok(new
+    {
+        success = true,
+        teacherId = teacher.Id,
+        teacherName = teacher.FullName,
+        username = teacher.EmployeeId,
+        plainPassword = plain
+    });
+});
+
+// POST /api/auth/reset-teacher-password (HR Admin Only)
+app.MapPost("/api/auth/reset-teacher-password", (ResetPasswordRequest req, HttpContext context, DataStore store) =>
+{
+    var authCheck = ValidateRole(context, store, "hr_admin");
+    if (authCheck != null) return authCheck;
+
+    var teacher = store.Teachers.FirstOrDefault(t => t.Id == req.TeacherId);
+    if (teacher == null) return Results.NotFound(new { error = "Teacher record not found." });
+
+    var currentUser = GetAuthenticatedUser(context, store)!;
+    var newPlain = !string.IsNullOrWhiteSpace(req.NewPassword) ? req.NewPassword : $"elswedy@{Random.Shared.Next(1000, 9999)}";
+    teacher.PlainPassword = newPlain;
+    teacher.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPlain, 10);
+    teacher.Password = "••••••••••••";
+
+    // Add Audit Log
+    store.AuditLogs.Insert(0, new AuditLog
+    {
+        Id = $"audit-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}",
+        Timestamp = DateTime.UtcNow.ToString("o"),
+        Action = "TEACHER_PASSWORD_RESET",
+        Entity = "TeacherCredential",
+        EntityId = teacher.Id,
+        ActorName = currentUser.Name,
+        ActorRole = "HR Admin",
+        Details = $"Regenerated institutional login credentials for {teacher.FullName} ({teacher.EmployeeId})."
+    });
+
+    return Results.Ok(new
+    {
+        success = true,
+        teacherId = teacher.Id,
+        plainPassword = newPlain,
+        message = $"Password for {teacher.FullName} reset successfully."
+    });
+});
 
 // 4. Dashboard: GET /api/dashboard (Protected)
 app.MapGet("/api/dashboard", (HttpContext context, DataStore store) =>
@@ -347,7 +517,17 @@ app.MapGet("/api/teachers/{id}", (string id, HttpContext context, DataStore stor
     if (authCheck != null) return authCheck;
 
     var teacher = store.Teachers.FirstOrDefault(t => t.Id == id);
-    return teacher != null ? Results.Ok(teacher) : Results.NotFound(new { error = "Teacher not found." });
+    if (teacher == null) return Results.NotFound(new { error = "Teacher not found." });
+
+    var attendanceHistory = store.AttendanceRecords.Where(r => r.TeacherId == id).ToList();
+    var leaves = store.LeaveRequests.Where(l => l.TeacherId == id).ToList();
+
+    return Results.Ok(new
+    {
+        teacher,
+        attendanceHistory,
+        leaves
+    });
 });
 
 // POST /api/teachers (HR Admin Only)
